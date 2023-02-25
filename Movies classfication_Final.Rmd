@@ -1,0 +1,1104 @@
+---
+title: "Movie Classification"
+output:
+  pdf_document: 
+  css: my-style.css
+  #geometry: margin=1in
+  #geometry: "left=0.5cm,right=0.5cm,top=0.5cm,bottom=0.4cm"
+  html_document: default
+  #fig_width: 4
+  #fig_height: 4
+date: '2023-02-18'
+---
+Authors: Yin, Karolina, Emma, Rachana, Sarah, Nupur
+
+# Raw Data Summary and Cleaning
+The Full MovieLens Dataset has 26 million ratings and 750,000 tag applications from 270,000 users on all the 45,000 movies. Before training predictive models, we cleaned the raw data by dropping irrelevant columns or columns with over 50% missing values, eliminating visually extreme values and created new metrics/features (weighted rating, ROI, profitability, etc.)
+
+# Data Analytics
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+```
+
+```{r, echo= FALSE, warning=FALSE,message=FALSE, results= 'hide', include=FALSE}
+## Preparing environment for using Python in RStudio
+library(reticulate)
+py_config()
+use_python("/Users/yinwang/Library/r-miniconda/envs/r-reticulate/bin/python")
+#py_install("pandas")
+#py_install("numpy")
+#py_install("matplotlib")
+#py_install("seaborn")
+#py_install("wordcloud")
+#*Primary Objectives*: 1. Obtain interesting facts and insights from movies data using data visualization. 2. build logistic predictive models to predict whether or not a movie is considered good or bad based on variables such as genres, director, runtime, etc. 
+```
+
+
+```{python, echo= FALSE, warning=FALSE, message=FALSE, results= 'hide', include=FALSE}
+import pandas as pd
+import numpy as np
+credits= pd.read_csv('/Users/yinwang/Desktop/folder/SMU/Spring_Mod_A/Applied Predictive Analysis/Week2/HW_2/archive/credits.csv')
+#keywords= pd.read_csv('keywords.csv')
+#links_small= pd.read_csv('links_small.csv')
+#links= pd.read_csv('links.csv')
+movies= pd.read_csv('/Users/yinwang/Desktop/folder/SMU/Spring_Mod_A/Applied Predictive Analysis/Week2/HW_2/archive/movies_metadata.csv' )
+#ratings_small= pd.read_csv('/Users/yinwang/Desktop/folder/SMU/Spring_Mod_A/Applied Predictive Analysis/Week2/HW_2/archive/ratings_small.csv')
+ratings= pd.read_csv('/Users/yinwang/Desktop/folder/SMU/Spring_Mod_A/Applied Predictive Analysis/Week2/HW_2/archive/ratings.csv')
+
+#process data(remove missing data, join movies with their respective ratings)
+movies.dropna(thresh= 20, inplace= True)
+ratings.groupby('movieId')['rating'].mean()
+movies_rating= pd.DataFrame(ratings.groupby('movieId')['rating'].mean())
+movies_rating['rating']= movies_rating['rating'].astype('float64')
+movies_rating= movies_rating.reset_index() 
+movies_rating['movieId']= movies_rating['movieId'].astype('int')
+movies['id']= movies['id'].astype('int')
+movies.revenue= movies.revenue.astype('int')
+movies.budget= movies.budget.astype('int') 
+#create a new measure ROI
+movies['ROI(%)']= (movies.revenue- movies.budget)/ movies.budget * 100 
+#create a new measure profitability
+movies['Profitability']= movies.revenue- movies.budget
+movies['Profitability']= movies['Profitability'].astype('float64') 
+movies= movies_rating.merge(movies, left_on= 'movieId', right_on='id')
+movies.isnull().sum()/len(movies) *100
+movies.drop(['belongs_to_collection','homepage','tagline'], axis= 1, inplace= True)
+
+# weight ratings based on ratings count
+C= movies.rating.mean()
+m= movies['rating'].quantile(0.90)   #cote counts exceed 95% of total movies
+df1= pd.DataFrame(ratings.groupby('movieId')['userId'].count()).reset_index()
+df2 = movies.merge(df1)
+df2= df2.rename({'userId':'rating_count'}, axis= 1)
+movies= df2.copy()
+def weighted_rating(x, m=m, C=C):
+    v = x['rating_count']
+    R = x['rating']
+    # Calculation based on the IMDB formula
+    return (v/(v+m) * R) + (m/(m+v) * C)
+# Define a new feature 'score' and calculate its value with `weighted_rating()
+movies['weighted_rating']= movies.apply(weighted_rating, axis= 1)
+```
+
+```{python, echo= FALSE, warning=FALSE, message=FALSE , results= 'hide', include=FALSE}
+from ast import literal_eval
+movies['genres'] = movies['genres'].fillna('[]').apply(literal_eval).apply(lambda x: [i['name'] for i in x] if isinstance(x, list) else [])
+movies= movies.merge(credits, left_on= 'movieId', right_on= 'id')
+movies['cast'] = movies['cast'].apply(literal_eval)
+movies['crew'] = movies['crew'].apply(literal_eval)
+movies['production_companies'] = movies['production_companies'].apply(literal_eval)
+movies['production_countries'] = movies['production_countries'].apply(literal_eval)
+movies['spoken_languages'] = movies['spoken_languages'].apply(literal_eval)
+def get_director(x):
+    for i in x:
+        if i['job'] == 'Director':
+            return i['name']
+    return np.nan
+movies['cast']= movies['cast'].fillna('[]').apply(lambda x: [i['name'] for i in x] if isinstance(x, list) else [])
+movies['production_companies']= movies['production_companies'].fillna('[]').apply(lambda x: [i['name'] for i in x] if isinstance(x, list) else [])
+movies['production_countries']= movies['production_countries'].fillna('[]').apply(lambda x: [i['name'] for i in x] if isinstance(x, list) else [])
+movies['spoken_languages']= movies['spoken_languages'].fillna('[]').apply(lambda x: [i['name'] for i in x] if isinstance(x, list) else [])
+movies['Director']= movies.crew.apply(get_director)
+movies['year'] = pd.to_datetime(movies['release_date'], errors='coerce').apply(lambda x: str(x).split('-')[0] if x != np.nan else np.nan)
+movies.drop(['rating','poster_path', 'crew','id_x','imdb_id','original_title','overview','release_date','id_y'],axis= 1, inplace= True)
+list_genres= []
+for i in range(len(movies)):
+    for j in list(movies.genres)[i]:
+        list_genres.append(j)
+data= {'Type_movies': list_genres, 'col':[* range(len(list_genres))]}
+df3= pd.DataFrame(data= data)
+df3= pd.DataFrame(df3.groupby('Type_movies')['col'].count()).reset_index()
+def get_first(x):
+    for first in x:
+        return x[0]  
+    return np.nan
+movies['cast']= movies['cast'].apply(get_first)
+movies.genres = movies.genres.apply(get_first)
+movies.production_companies = movies.production_companies.apply(get_first)
+movies.production_countries = movies.production_countries.apply(get_first)
+```
+
+
+```{python, warning=FALSE, message= FALSE, echo= FALSE, results= 'hide', include=FALSE}
+movies_1= movies[(movies['budget'] != 0) & (movies['revenue'] != 0)]
+cut_off= movies.weighted_rating.quantile(0.80)
+list_result= []
+for num in movies.weighted_rating.values: 
+    if num > cut_off:
+        list_result.append(1)
+    else:
+        list_result.append(0) 
+movies_1['result']= pd.DataFrame(list_result) 
+for i in ('genres','production_companies','production_countries','cast'):
+    movies_1[i]= movies_1[i].fillna('NaN') 
+df_year= pd.DataFrame(movies_1.groupby('year')['movieId'].nunique())
+df_year.reset_index(inplace= True)
+df_year.rename(columns= {'movieId':'#movies_released'}, inplace= True)
+df_year.year= df_year.year.astype('int') 
+movies_1.year= movies_1.year.astype('int')
+movies_1= pd.merge(df_year,movies_1, on= 'year' )
+# movies_1.drop('movieId', axis= 1, inplace= True)
+movies_1.drop(['adult','video'], axis= 1, inplace= True)
+
+```
+
+```{python, echo = FALSE, message = FALSE, warning= FALSE, result= 'hide', include= FALSE}
+#drop outliners
+import matplotlib.pyplot as plt
+movies_1.drop(index= [14, 322], inplace= True)
+profit= movies_1.sort_values('Profitability', ascending=False)
+dummy =  profit.result.tolist()
+
+bar_colors = []
+for value in dummy:
+    if value == 1:
+        bar_colors.append('green')
+    else:
+        bar_colors.append('skyblue')
+plt.figure(figsize=(8,2.5))
+plt.barh(profit['title'].head(10),profit['Profitability'].head(10), align='center',
+        color= bar_colors)
+plt.gca().invert_yaxis()
+plt.xlabel("Revenue (Billions)")
+plt.title("Top 10 Profitable Movies")
+#plt.yticks(range(10), profit['title'])
+# Adjust the layout to fit the long titles
+plt.tight_layout()
+plt.show()
+
+```
+
+```{python, echo = FALSE, message = FALSE, result= 'hide', include= FALSE}
+roi = movies_1.sort_values('ROI(%)', ascending=False)
+top_movies = roi.iloc[1:11]  # Remove the first movie and include the 11th
+dummy =  roi.result.tolist()
+
+bar_colors = []
+for value in dummy:
+    if value == 1:
+        bar_colors.append('green')
+    else:
+        bar_colors.append('skyblue')
+
+plt.figure(figsize=(8,2.5))
+plt.barh(top_movies['title'], top_movies['ROI(%)'], align='center',
+        color= bar_colors[1:11] )
+plt.gca().invert_yaxis()
+plt.xlabel("ROI (%)")
+plt.title("Top 10 ROI Movies")
+
+# Set the yticks to the full movie titles
+plt.yticks(range(10), top_movies['title'])
+
+# Adjust the layout to fit the long titles
+plt.tight_layout()
+
+plt.show()
+
+```
+
+
+```{r, echo = FALSE, message = FALSE, results= 'hide', include=FALSE}
+#load movies_cleaned data made by Python
+movies_1 <- read.csv("/Users/yinwang/Desktop/folder/SMU/Spring_Mod_A/Applied Predictive Analysis/Week2/HW_2/archive/movies_cleaned.csv")
+head(movies_1)
+```
+
+
+
+```{r, echo= FALSE, warning= FALSE, message= FALSE, fig.width=7 ,fig.height= 3}
+library(ggplot2)
+library(ggeasy)
+library(magrittr)
+library(dplyr)
+#install.packages("cowplot")
+library(cowplot)
+
+# First plot
+plot1 <- ggplot(movies_1, aes(x = weighted_rating, fill = cut(weighted_rating, 100))) + 
+  geom_histogram(show.legend = FALSE, bins = 40) + 
+  theme_bw() + 
+  theme(plot.title = element_text(size = 12),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10)) +
+  xlab("Movies Rating") +
+  ylab("Movies Rating Count") +
+  scale_fill_discrete(h = c(240, 10), c = 120, l = 70) +
+  ggtitle("Histogram of Movie Ratings") + 
+  ggeasy::easy_center_title() +
+  geom_vline(xintercept = quantile(movies_1$weighted_rating, 0.85), linetype = "dashed", color= 'red') +
+  annotate("text", x = quantile(movies_1$weighted_rating, 0.85) + 0.45, y = 120, label = "Cut-off", color = "black")
+
+# Second plot
+result_1 <- movies_1 %>% 
+  filter(result == 1) %>% 
+  group_by(year) %>% 
+  summarise(count = n())
+
+result_all <- movies_1 %>% 
+  group_by(year) %>% 
+  summarise(count = n())
+
+plot2_size <- c(6, 4)
+plot2_ratio <- 4/3  # Change this to adjust the ratio of width to height
+
+plot2 <- ggplot() +
+  geom_line(data = result_1, aes(x = year, y = count, color = "Good Movies")) +
+  geom_line(data = result_all, aes(x = year, y = count, color = "All Movies")) +
+  scale_color_manual(name = "Result", values = c("Good Movies" = "#FF6B6B", "All Movies" = "#70C1B3")) +
+  labs(x = "Year", y = "Number of Movies", title = "Number of Movies Released Each Year") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45), plot.title = element_text(size = 14), legend.position = "top",legend.title = element_blank()) +
+  scale_x_continuous(breaks = seq(1920, 2020, 10), limits = c(1920, 2020)) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, max(result_all$count))) 
+
+# Combine plots
+plot_grid(plot1, plot2,  ncol = 2, align = "h", rel_widths = c(1, plot2_ratio))
+
+
+```
+
+
+## Understanding Movies Rating and History
+Based on IMDB's weighted rating (wr) formula, we created a new fairer feature "weighted_rating" which takes number and average of voter ratings into consideration during calculation. Having observed below histogram, it is safe to argue that vast majority of movies rating are above 3.0. Therefore, in order to set apart "good" movies, we need to establish a criteria determining ultimate result, which is "if weighted_rating > cut-off 3.54, and vice versa.) Specifically, the cut-off is derived from 85th quantile of weighted rating, meaning if a movie's weighted rating > 3.54,  then it is better than 85% all movies, thus rendering itself as "good movies".
+To identify factors that may influence a movie's rating, we considered various explanatory variables, such as the cast, budget, production company, release date, number of competing movies released at the same time, and movie length (runtime). 
+```{r, echo = FALSE, message = FALSE, eval= FALSE}
+ggplot(data=movies_1 %>% filter(genres != 'NaN'), aes(x=genres, y=round(revenue/1000000, 1))) +
+geom_boxplot(outlier.colour="red", outlier.shape=5, outlier.size=2) +
+stat_summary(fun = "mean", geom = "point", shape = 8, size = 2, color = "white") +
+ggtitle("Revenue by Genres") +
+ylab("Revenue (in millions)") +
+xlab("Genre") + ggeasy::easy_center_title()+
+coord_flip()
+```
+
+```{r, echo = FALSE, message = FALSE, warning= FALSE, fig.align='center', fig.width=4, fig.height= 3}
+#install.packages("magrittr")
+library(dplyr, warn.conflicts = FALSE, quietly = TRUE)
+library(magrittr, warn.conflicts = FALSE, quietly = TRUE)
+movies_2 <- movies_1 %>%  
+  group_by(genres) %>% 
+  summarise(mean_revenue = mean(revenue)) %>%  
+  top_n(10, mean_revenue) %>% 
+  arrange(desc(mean_revenue)) 
+
+plot2 <- ggplot(data=movies_2 , aes(x= reorder(genres, -mean_revenue), y= mean_revenue/1000000, fill= genres, color= genres)) + 
+  geom_bar(stat = "identity", position = "dodge",show.legend = FALSE)+
+   xlab("Genres")+ ylab("Average Revenue (Millions)")+
+  # Vertical rotation of x axis text
+theme(axis.text.x = element_text(angle = 60))+
+  geom_hline(yintercept = 250, linetype = "dashed", color = "red")+
+  ggtitle("Top 10 Genres by Anverage Revenue")+  ggeasy::easy_center_title()
+plot2
+```
+
+## Findings on revenue vs genre: 
+Adventure, Family,Animation genres generally generate the most amount of revenue. It is interesting to notice that Action, Adventure, and Drama genres also score top 10% in terms of the length of the movie, which can result in higher popularity due to length preferences in comparison with other genres. This probably resulted in increase in revenue
+
+```{python, echo = FALSE, message = FALSE, result= 'hide', include= FALSE}
+import pandas as pd
+import numpy as np
+movies_1= pd.read_csv('movies_cleaned.csv')
+import matplotlib.pyplot as plt
+movies_1['popularity'] = movies_1['popularity'].astype('float64')
+pop= movies_1.sort_values('popularity', ascending=False)
+dummy =  pop.result.tolist()
+
+bar_colors = []
+for value in dummy:
+    if value == 1:
+        bar_colors.append('green')
+    else:
+        
+        bar_colors.append('skyblue')
+plt.figure(figsize=(8,2.5))
+
+plt.barh(pop['title'].head(10),pop['popularity'].head(10), align='center',
+        color= bar_colors)
+plt.gca().invert_yaxis()
+plt.xlabel("Popularity")
+plt.title("Top 10 Popular Movies")
+#plt.yticks(range(10),pop['title'])
+# Adjust the layout to fit the long titles
+plt.tight_layout()
+plt.show()
+```
+
+```{python,echo = FALSE, fig.align='left', message = FALSE, warning= FALSE, result= 'hide'}
+movies_1= pd.read_csv('movies_cleaned.csv')
+revenue= movies_1.sort_values('revenue', ascending=False)
+dummy =  revenue.result.tolist()
+
+bar_colors = []
+for value in dummy:
+    if value == 1:
+        bar_colors.append('green')
+    else:
+        bar_colors.append('skyblue')
+plt.figure(figsize=(8,2.5))
+plt.barh(revenue['title'].head(10),revenue['revenue'].head(10), align='center',
+        color= bar_colors)
+plt.gca().invert_yaxis()
+plt.xlabel("Revenue (Billions)")
+plt.title("Top 10 Revenue Movies")
+#plt.yticks(range(10), revenue['title'])
+# Adjust the layout to fit the long titles
+plt.tight_layout()
+plt.show()
+```
+
+## Findings on revenue vs movies: 
+For Top Revenue Movies it turned out that Titanic and Avengers scored highest for the revenue but 2 movie Pirates of the Caribbean Dead’s Man’s Chest, Harry Potter and the Philosophere's Stone had highest ratings above 3.54 considering they are a good movie. This can be attributed to the cause of different audience demographics with varying preferences but interestingly Pirates of the Caribbean might have highest rating due to its genre adventure and its length which can be related to the insight in 2.2.1
+
+```{python, echo = FALSE, message = FALSE, warning= FALSE, result= 'hide'}
+#drop outliners
+movies_1.drop(index= [14, 322], inplace= True)
+profit= movies_1.sort_values('Profitability', ascending=False)
+dummy =  profit.result.tolist()
+
+bar_colors = []
+for value in dummy:
+    if value == 1:
+        bar_colors.append('green')
+    else:
+        bar_colors.append('skyblue')
+plt.figure(figsize=(8,2.5))
+plt.barh(profit['title'].head(10),profit['Profitability'].head(10), align='center',
+        color= bar_colors)
+plt.gca().invert_yaxis()
+plt.xlabel("Revenue (Billions)")
+plt.title("Top 10 Profitable Movies")
+#plt.yticks(range(10), profit['title'])
+# Adjust the layout to fit the long titles
+plt.tight_layout()
+plt.show()
+
+```
+
+## Findings on profitability vs movies: 
+Top Profitable Movies that present four good movies with rating > 3.54 are marked in green. These four movies fall under the genre of Adventure. Interestingly, Adventure genre again appears to be on top in terms of Profitability supporting insights 2.2.1 and 2.3.1.
+
+```{r, echo= FALSE, warning= FALSE, message= FALSE, fig.align='center', fig.width=7, fig.height= 4}
+library(reshape2)
+#Average profitability and budget in millions by genre
+movies_2 <- movies_1 %>% group_by(genres) %>% summarise(Profitability = round(mean(Profitability/1000000, na.rm = T),1),budget = round(mean(budget/1000000, na.rm = T),1)) %>% ungroup() %>% filter(genres != 'NaN')
+melt_data <- melt(movies_2, id = c("genres"))
+melt_data %>%
+ggplot(aes(x = genres, y = value, fill = variable)) +
+geom_bar(stat = "identity", position = "dodge") +
+geom_text(aes(label = value), position = position_dodge(width = 0.9), vjust = -0.25, size=3) +
+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+ggtitle("Profitability and Budget by Genres") +
+ylab("Dollar Amount (Millions)") +
+xlab("Genre")+
+ggeasy::easy_center_title()
+
+```
+
+## Findings on Profitability/budget vs genres: 
+Adventure, Family, and Animation genres have the highest profitability. Interestingly, Adventure genre again shows that not just in tops in revenue but by spending small budget- profit and revenue can be easily maximized in this genre. This again supports all the above insights.
+
+```{r, echo = FALSE, message = FALSE, eval= FALSE, include=FALSE}
+#5Popularity by Genre
+
+ggplot(data=movies_1 %>% filter(genres != 'NaN'), aes(x=genres, y=round(popularity, 1))) + geom_boxplot(outlier.colour="red", outlier.shape=5, outlier.size=2) +
+stat_summary(fun = "mean", geom = "point", shape = 8, size = 2, color = "white") +
+ggtitle("Popularity by Genres") +
+ylab("Popularity") +
+xlab("Genre") +
+coord_flip()
+```
+
+
+```{r, echo = FALSE, message = FALSE,  eval= FALSE, include=FALSE}
+#6 Revenue by Genre
+ggplot(data=movies_1 %>% filter(genres != 'NaN'), aes(x=genres, y=round(revenue/1000000, 1))) +
+geom_boxplot(outlier.colour="red", outlier.shape=5, outlier.size=2) +
+stat_summary(fun = "mean", geom = "point", shape = 8, size = 2, color = "white") +
+ggtitle("Revenue by Genres") +
+ylab("Revenue (in millions)") +
+xlab("Genre") +
+coord_flip()
+```
+
+```{python, message= FALSE, warning= FALSE, echo= FALSE}
+import matplotlib.pyplot as plt
+movies_pie= movies_1.copy()
+lang_df= pd.DataFrame(movies_pie['original_language'].value_counts())
+
+# First pie chart
+values1 = [1447, 128]
+labels1 = ['English', 'Other']
+explode1 = [0, 0.2]  # Explode the "Other" category
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+
+ax1.pie(values1, labels=labels1, explode=explode1, autopct='%1.1f%%', colors=['#3399FF', '#FFCC99'])
+ax1.set_title('Movies Count by English Language vs Other', fontsize= 14)
+ax1.axis('equal')
+
+# Second pie chart
+values2 = lang_df.drop(index='en').iloc[:10, 0].values.tolist()+[20]
+labels2 = ['French', 'Spanish', 'Russian', 'Japanese', 'German', 'Korean', 'Italian', 'Hindi', 'Chinese', 'Danish', 'Others']
+
+ax2.pie(values2, pctdistance=0.8, labels=labels2, autopct='%1.1f%%', colors=['#99CCFF', '#FF6666', '#FFCC99', '#FFFF99', '#99FF99', '#FF99FF', '#CC99FF', '#66CCCC', '#FF9966', '#666699', '#CCCCCC'])
+ax2.set_title('Movies Count by Other Languages',  fontsize= 14)
+ax2.axis('equal')
+
+plt.subplots_adjust(wspace=0.4)
+
+plt.show()
+```
+
+
+
+
+```{python, echo= FALSE, message= FALSE, warning= FALSE, results= 'hide', include=FALSE}
+movies_1= pd.read_csv('/Users/yinwang/Desktop/folder/SMU/Spring_Mod_A/Applied Predictive Analysis/Week2/HW_2/archive/movies_cleaned.csv')
+kw= pd.read_csv('/Users/yinwang/Desktop/folder/SMU/Spring_Mod_A/Applied Predictive Analysis/Week2/HW_2/archive/keywords.csv')
+```
+
+
+```{python, echo= FALSE, fig.align='center', fig.width=4, fig.height= 3}
+from ast import literal_eval
+movies_1['weighted_rating'].quantile(0.85)
+movies_2= movies_1[movies_1['weighted_rating']> 3.54 ].merge(kw, left_on= 'movieId', right_on= 'id')
+movies_2['keywords']= movies_2['keywords'].apply(literal_eval).fillna('[]').apply(lambda x: [i['name'] for i in x] if isinstance(x, list) else []) 
+movies_2['keywords_1']= movies_2['keywords'].apply(get_first)
+def get_second(x):
+    for second in x:
+        if len(x) >=2:
+            return x[1]  
+    return np.nan
+movies_2['keywords_2']= movies_2['keywords'].apply(get_second)
+data= {'kw': movies_2['keywords_1'].tolist()+ (movies_2['keywords_2'].tolist()), 
+       'cnt': [*range(len(movies_2['keywords_1'].tolist()+ (movies_2['keywords_2'].tolist())))] }
+df2= pd.DataFrame(data= data)
+df2.dropna(inplace= True)
+text = movies_2['keywords_1'].tolist()+ movies_2['keywords_2'].tolist() 
+# Create a list of strings as input
+
+text = ['world war i', 'fire',
+ 'philadelphia',
+ 'corruption',
+ 'monte carlo',
+ 'germany',
+ 'detective',
+ 'texas',
+ 'mexico',
+ "new year's eve",
+ 'musical',
+ 'southern usa',
+ 'brother brother relationship',
+ 'assassination',
+ 'roman',
+ 'israel',
+ 'mutiny',
+ 'independent film',
+ 'usa',
+ 'cairo',
+ 'blindness and impaired vision',
+ 'usa president',
+ 'love triangle',
+ 'sheriff',
+ 'ambush',
+ 'prison',
+ 'usa',
+ 'moon',
+ 'san francisco',
+ 'female nudity',
+ 'london england',
+ 'england',
+ 'life and death',
+ 'paris',
+ 'farewell',
+ 'prison',
+ 'netherlands',
+ 'stewardess',
+ 'based on novel',
+ 'elves',
+ 'helicopter',
+ 'female nudity',
+ 'guerrilla',
+ 'exploitation',
+ 'taxi',
+ 'video game',
+ 'prison',
+ 'uss enterprise',
+ 'miami',
+ 'street gang',
+ 'dancing',
+ 'prophecy',
+ 'holiday',
+ 'dancing',
+ 'new york',
+ 'buddhism',
+ 'brother brother relationship',
+ 'swashbuckler',
+ 'helicopter',
+ 'minister',
+ 'cia',
+ 'therapist',
+ 'dystopia',
+ 'gang',
+ 'holiday',
+ 'beach',
+ 'underdog',
+ 'prison',
+ 'skab under tv',
+ 'new york',
+ 'crime fighter',
+ 'violence',
+ 'wish',
+ 'cyborg',
+ 'film business',
+ 'suicide attempt',
+ 'surfer',
+ 'sex',
+ 'riddle',
+ 'brother brother relationship',
+ 'holiday',
+ 'rookie cop',
+ 'father son relationship',
+ 'father son relationship',
+ 'newspaper',
+ 'new orleans',
+ 'new york',
+ 'detective',
+ 'paris',
+ 'dual identity',
+ 'loss of mother',
+ 'roommate',
+ 'japan',
+ 'clone',
+ 'robbery',
+ 'exotic island',
+ 'bomb',
+ 'brother brother relationship',
+ 'gambling',
+ 'board game',
+ 'federation',
+ 'new york',
+ 'spacecraft',
+ 'paris',
+ 'sport',
+ 'divorce',
+ 'london england',
+ 'paris',
+ 'pornography',
+ 'brother brother relationship',
+ 'drag queen',
+ 'karaoke',
+ 'usa',
+ 'secret',
+ 'lapd',
+ 'shakespeare',
+ 'paris',
+ 'usa president',
+ 'farewell',
+ 'southern usa',
+ 'child abuse',
+ 'martinique',
+ 'space battle',
+ 'artificial intelligence',
+ 'venice',
+ 'cataclysm',
+ 'london england',
+ 'video game',
+ 'san francisco',
+ 'small town',
+ 'monster',
+ 'teenager',
+ 'shark attack',
+ 'new york',
+ 'individual',
+ 'terror',
+ 'usa',
+ 'mars',
+ 'bounty',
+ 'drug dealer',
+ 'martial arts',
+ 'love triangle',
+ 'prison',
+ 'paris',
+ 'duke',
+ 'southern usa',
+ 'son',
+ 'workaholic',
+ 'california',
+ 'dancing',
+ 'servant',
+ 'elves',
+ 'london england',
+ 'saving the world',
+ 'new york',
+ 'paris',
+ 'suicide',
+ 'resistance',
+ 'submarine',
+ 'based on tv series',
+ 'saving the world',
+ 'london england',
+ 'gay',
+ 'london england',
+ 'sushi restaurant',
+ 'paris',
+ 'california',
+ 'loss of lover',
+ 'amnesia',
+ 'miami',
+ 'paris',
+ 'shotgun',
+ 'white russian',
+ 'christianity',
+ 'free love',
+ 'skab under tv',
+ 'refugee',
+ 'brother brother relationship',
+ 'amnesia',
+ 'aristotle',
+ 'brother brother relationship',
+ 'father son relationship',
+ 'berlin',
+ 'paris',
+ 'jealousy',
+ 'london england',
+ 'competition',
+ 'love triangle',
+ 'riddle',
+ 'himalaya',
+ 'bachelor',
+ 'transporter',
+ 'lion',
+ 'clone',
+ 'loss of son',
+ 'salesclerk',
+ 'chaos theory',
+ 'new york',
+ 'witch',
+ 'based on tv series',
+ 'brain tumor',
+ 'snake',
+ 'car race',
+ 'mammoth',
+ 'philadelphia',
+ 'london england',
+ 'world war ii',
+ 'sex',
+ 'professor',
+ 'evisceration',
+ 'poison',
+ 'independent film',
+ 'male nudity',
+ 'world war ii',
+ 'usa president',
+ 'hunter',
+ 'midlife crisis',
+ 'winter',
+ 'religion and supernatural',
+ 'brother sister relationship',
+ 'saving the world',
+ 'saving the world',
+ 'new york',
+ 'love at first sight',
+ 'california',
+ 'parody',
+ 'england',
+ 'bureaucracy',
+ 'new love',
+ 'based on novel',
+ 'journalist',
+ 'father son relationship',
+ 'job-hopping',
+ 'sex',
+ 'corruption',
+ '1970s',
+ 'robbery',
+ 'police',
+ 'competition',
+ 'car race',
+ 'fight',
+ 'rebel',
+ 'tree',
+ 'infidelity',
+ 'saving the world',
+ 'brother brother relationship',
+ 'rape',
+ 'self-defense',
+ 'monster',
+ 'terrorism',
+ 'bank',
+ 'conspiracy of murder',
+ 'competition',
+ 'capitalism',
+ 'new delhi india',
+ 'wife husband relationship',
+ 'slapstick',
+ 'silent film',
+ 'monster',
+ 'musical',
+ 'washington d.c.',
+ 'based on novel',
+ 'dictator',
+ 'obsession',
+ 'dangerous',
+ 'gold',
+ 'screenwriter',
+ 'universal exhibition',
+ 'rape',
+ 'chauffeur',
+ 'spy',
+ 'prince',
+ 'jewry',
+ 'climate change',
+ 'prison',
+ 'arabian',
+ 'education',
+ 'general',
+ 'nurse',
+ 'ranch',
+ 'sheriff',
+ 'rebel',
+ 'hong kong',
+ 'jupiter',
+ 'hotel',
+ 'sex',
+ 'suicide',
+ 'rape',
+ 'prostitute',
+ 'sex',
+ 'rock and roll',
+ 'stadium',
+ 'world war ii',
+ 'pilot',
+ 'future',
+ 'dwarves',
+ 'news broadcast',
+ 'nudity',
+ 'river',
+ 'biography',
+ 'street gang',
+ 'hacker',
+ 'convict',
+ 'genesis',
+ 'corruption',
+ 'billard',
+ 'dance',
+ 'witch',
+ 'monster',
+ 'dancer',
+ 'cat',
+ 'japan',
+ 'california',
+ 'evil prince',
+ 'journalist',
+ 'giant snake',
+ 'drag queen',
+ 'vampire',
+ 'social commentary',
+ 'police detective',
+ 'boss',
+ 'mission of murder',
+ 'love at first sight',
+ 'sex',
+ 'Øverste hylde',
+ 'monster',
+ 'cook',
+ 'postal worker',
+ 'shotgun',
+ 'screenplay',
+ 'underground',
+ 'undercover',
+ 'eroticism',
+ 'amnesia',
+ 'corruption',
+ 'corruption',
+ 'dog biscuit',
+ 'film producer',
+ 'lovesickness',
+ 'butler',
+ 'mercenary',
+ 'corruption',
+ 'undercover',
+ 'san francisco',
+ 'bank',
+ 'loss of sister',
+ 'yuppie',
+ 'new york',
+ 'dream',
+ 'detective',
+ 'treasure',
+ 'taxi',
+ 'chicago',
+ 'miami',
+ 'disappearance',
+ 'starfleet',
+ 'sex',
+ 'patriotism',
+ 'london england',
+ 'basketball',
+ 'divorced woman',
+ 'england',
+ 'london england',
+ 'sex',
+ 'loss of father',
+ 'voodoo',
+ 'marriage proposal',
+ 'neo-nazi',
+ 'atomic bomb',
+ 'house on fire',
+ "love of one's life",
+ 'france',
+ 'nasa',
+ 'regret',
+ 'black people',
+ 'sense of guilt',
+ 'claude monet',
+ 'spaceship',
+ 'simulation',
+ 'italy',
+ 'airplane',
+ "new year's eve",
+ 'hacker',
+ 'bachelor',
+ 'self-discovery',
+ 'weapon',
+ 'attic',
+ 'shark',
+ 'travel',
+ 'dancing',
+ 'spain',
+ 'war on drugs',
+ 'spacecraft',
+ 'gangster boss',
+ 'greenhouse',
+ 'female friendship',
+ 'rabbi',
+ 'pickpocket',
+ 'love triangle',
+ 'musical',
+ 'waitress',
+ 'ancient egypt',
+ 'dogsitter',
+ 'brother sister relationship',
+ 'spy',
+ 'money',
+ 'orcs',
+ 'suicide',
+ 'secret identity',
+ 'custody battle',
+ 'barcelona spain',
+ 'california',
+ 'fascism',
+ 'soviet union',
+ 'female protagonist',
+ 'artificial intelligence',
+ 'female nudity',
+ 'father son relationship',
+ 'male nudity',
+ 'rage and hate',
+ 'love triangle',
+ 'san francisco',
+ 'loss of family',
+ 'mental institution',
+ 'ku klux klan',
+ 'journalist',
+ 'based on short film',
+ 'sex',
+ 'jewry',
+ 'hotel',
+ 'Øverste hylde',
+ 'mass murder',
+ 'paraplegic',
+ 'chaos theory',
+ 'egypt',
+ 'loss of brother',
+ 'love at first sight',
+ 'assassin',
+ 'france',
+ 'wife husband relationship',
+ 'himalaya',
+ 'moderator',
+ 'london england',
+ 'serial killer',
+ 'martial arts',
+ 'ex-boyfriend',
+ 'netherlands',
+ 'hippopotamus',
+ 'transplantation',
+ 'sheriff',
+ 'bank robbery',
+ 'chicago',
+ 'fortune teller',
+ 'drug deal',
+ 'nudity',
+ 'airplane',
+ 'car journey',
+ 'sloth',
+ 'transporter',
+ 'berlin',
+ 'cave',
+ 'adultery',
+ 'literature',
+ 'javelin',
+ 'helicopter',
+ 'sex',
+ 'dying and death',
+ 'agent',
+ 'mountain',
+ 'marriage',
+ 'psychopath',
+ 'dying and death',
+ 'friendship',
+ 'tyrannosaurus rex',
+ 'bomb',
+ 'brother brother relationship',
+ 'loss of brother',
+ 'san francisco',
+ 'parallel world',
+ 'compass',
+ 'usa',
+ 'ten commandments',
+ 'sister sister relationship',
+ 'terrorist',
+ 'monster',
+ 'shoe seller',
+ 'marriage proposal',
+ 'sniper',
+ 'afghanistan',
+ 'mentally disabled',
+ 'los angeles',
+ 'greece',
+ 'loss of brother',
+ 'blindness and impaired vision',
+ 'martial arts',
+ 'natural disaster',
+ 'subway',
+ 'artificial intelligence',
+ 'brother-in-law',
+ '1970s',
+ 'widower',
+ 'greek mythology',
+ 'british farce',
+ 'future',
+ 'bad boss',
+ 'jealousy',
+ 'prime minister',
+ 'himachal pradesh india',
+ 'children',
+ 'teen angst']
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+
+# Generate the word cloud
+wordcloud = WordCloud(background_color="white",margin=20,width=800,height=600,prefer_horizontal=0.7,max_words=50,scale=2).generate(text= ' '.join(text))
+
+# Plot the word cloud
+plt.figure(figsize= (8,6))
+plt.imshow(wordcloud, interpolation='bilinear')
+plt.axis("off")
+plt.show()
+```
+## Findings on Word Cloud: 
+Turns out that city, name and family matters relate to higher rating. Overall, Adventure and Family genre movies rank high in revenue, profitability, length and rating. 
+
+# Model: 
+Logistic model was used to determine which variables have a significant impact on a movie's rating and to draw meaningful insights from the data.3.Six logistic models in total had been trained, and the last one was selected as final model due to that fact that it has the lowest AIC (1771.6), striking a good balance between simplicity and complexity. The descending ranking of feature importance is: number of ratings,  number of voting, genre-drama, genre-crime, original language-English, cast-Julia Roberts(JR), adventure, genre-horror, runtime, genre-comedy, number of movies released that year, genre-war, production company-DreamWorks. 
+Overall Adventure and family genre movies tend to be highly profitable and have a strong market demand. They have a wide appeal and can attract a broad audience. These movies tend to resonate emotionally with viewers and the emotional connection can lead to a more engaged audience. These genres have consistently performed well in terms of box office revenue and audience ratings. Additionally, our analysis revealed that longer movies tend to perform better at the box office. Movies that are around two hours or more tend to have higher box office revenue and audience ratings than those that are shorter in length. It is due to immersive experience by viewers. Given these findings, we recommend that the production team focus on developing movies within the adventure, action, and drama genres, and consider creating longer films to maximize profitability. 
+```{r, message=FALSE, warning=FALSE, include= FALSE, fig.show='hide', results='hide', echo= FALSE}
+# factorize categorical data
+movies_1$year <- as.factor(movies_1$year)
+movies_1$genres <- as.factor(movies_1$genres)
+movies_1$original_language <- as.factor(movies_1$original_language)
+movies_1$production_companies <- as.factor(movies_1$production_companies)
+movies_1$spoken_languages <- as.factor(movies_1$spoken_languages)
+movies_1$status <- as.factor(movies_1$status)
+movies_1$cast <- as.factor(movies_1$cast)
+movies_1$Director <- as.factor(movies_1$Director)
+movies_1$result <- as.factor(movies_1$result)
+
+
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, results= 'hide', include=FALSE}
+
+library(dplyr)
+library(ggcorrplot)
+numeric_movies <- select_if(movies_1, is.numeric)
+corr_matrix <- cor(numeric_movies)
+ggcorrplot(corr_matrix, lab = TRUE,method = "circle",type = "lower",hc.order = TRUE)
+
+colnames(movies_1)
+model_1 <- glm(result~ genres , data= movies_1, family = binomial(link = "logit"))
+summary(model_1)
+
+movies_2 <- movies_1 %>% mutate(drama= (genres == "Drama")*1,
+                                war= (genres == "War")*1,
+                                com= (genres == "Comedy")*1,
+                                adv = (genres == "Adventure")*1,
+                                hor= (genres== "Horror")*1,
+                                cri= (genres== "Crime")*1,
+                                )
+        
+model_3 <- glm(result~ war+com+adv+hor+cri+drama, data= movies_2, family = binomial(link = "logit"))
+summary(model_3)
+
+movies_3 <- movies_2 %>% mutate(NE= (Director== "Nora Ephron")*1,
+                                DP= (Director== "Dean Parisot")*1,
+                                GG= (Director== "George Gallo")*1,
+                                PW= (Director== "Peter Webber")*1,
+                                CS= (Director== "Carlos Saldanha")*1)
+model_4 <- glm(result~ war+com+adv+hor+cri+NE+DP+PW, data= movies_3, family = binomial(link = "logit"))
+summary(model_4)
+
+movies_4 <- movies_3 %>% mutate(AMS= (Director== "Armin Mueller-Stahl")*1,
+                                GU= (Director== "Gaspard Ulliel")*1,
+                                CM= (Director== "Choi Min-sik")*1,
+                                GH = (Director == "Gavin Hood")*1,
+                                MB = (Director == "Michael Bay")*1,
+                                JR = (cast == "Julia Roberts")*1,
+                                GL= (cast== "George Lazenby")*1,
+                                en = ( original_language== "en")*1,
+                                DW_c= (production_companies== "DreamWorks")*1)
+model_4 <- glm(result~ drama+ war+com+adv+hor+cri+NE+DP+GH+MB+ JR+NE+GL+en+ budget+ DW_c+revenue+ popularity+X.movies_released+ runtime+ vote_average+rating_count+Profitability+vote_count, data= movies_4, family = binomial(link = "logit"))
+summary(model_4)
+
+# Get the feature importances
+coefs <- coef(model_4)
+X <- movies_4[c('drama',  'war', 'com', 'adv', 'hor', 'cri', 'NE', 'DP', 'GH', 'MB',  'JR', 'NE',  'GL' , 'en',  'budget', 'DW_c', 'revenue', 'popularity', 'X.movies_released',  'runtime', 'vote_average', 'rating_count', 'Profitability', 'vote_count')]
+# Print the feature importances
+for (i in 1:ncol(X)) {
+  print(paste("Feature", i, ":", colnames(X)[i], "Importance:", coefs[i]))
+}
+
+# Load the caret library
+library(caret)
+
+# Assume you have a data frame with your features and target variable
+df <- movies_4[c('drama',  'war', 'com', 'adv', 'hor', 'cri', 'NE', 'DP', 'GH', 'MB',  'JR', 'NE',  'GL' , 'en',  'budget', 'DW_c', 'revenue', 'X.movies_released',  'runtime', 'vote_average', 'rating_count', 'Profitability', 'vote_count','result')] 
+
+# Fit a logistic regression model
+model_5 <- train(result ~ ., data = df, method = "glm", trControl = trainControl(method = "cv"))
+
+# Plot the feature importance
+varImp(model_5)
+summary(model_5)
+
+
+df <- movies_4[c('drama',  'war', 'com', 'adv', 'hor','JR', 'cri' , 'en', 'DW_c', 'X.movies_released', 'runtime','vote_count', 'rating_count','result')] 
+
+# Fit a logistic regression model
+model_6 <- train(result ~ ., data = df, method = "glm", trControl = trainControl(method = "cv"))
+
+# Plot the feature importance
+varImp(model_6)
+summary(model_6)
+
+
+basecase <- data.frame(drama= 0,  war= 0, com= 0, adv=0, hor= 0, cri= 1 , en= 1, DW_c= 1, X.movies_released= 10, runtime= 230, rating_count= 5626, vote_count= 23)
+  
+#predict(model_6, basecase, type = "prob")
+```
+
+
